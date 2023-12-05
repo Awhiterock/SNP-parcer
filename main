@@ -1,0 +1,201 @@
+class GeneSearch:
+    def __init__(self):
+        self.file_path = filedialog.askopenfilename()
+    
+    def GetGenes(self):
+        data = pd.read_excel(self.file_path)
+        gene_col = data['GENE_Name']
+        gene_val = gene_col.unique().astype(str).tolist()
+        print('ID генов для поиска: ', gene_val)
+        return gene_val
+    
+    def filter_IDs(self, gene_name, record):
+        count_IDs = int(record['Count'])
+        id_list = record['IdList']
+        if count_IDs >=1: 
+            output_id = record['IdList'][0]
+            if count_IDs > 1:
+                print(f'''Обнаружено несколько ID для гена {gene_name}. Добавлен ID: {output_id}.
+                      Остальные ID: {', '.join(id_list[1:])}''')
+            return output_id
+        else:
+            print(f'Для гена с именем {gene_name} не найдено ни одного ID.')
+            return None
+        
+    def search_IDs(self, gene_val):
+        id_list = []
+        for gene_name in gene_val:
+            handle = Entrez.esearch(db = 'gene', term = (str(gene_name) + '[Gene] AND txid9606[Orgn]'))
+            record = Entrez.read(handle)
+            gene_id = self.filter_IDs(gene_name, record)
+            if gene_id is not None: id_list.append(gene_id)
+            else:continue
+        return id_list
+    
+    def search_genes(self, gene_ids):
+        gene_datas = []
+        for gene in gene_ids:
+            try:
+                gene_data = {'GENE_ID' : gene}
+                handle = Entrez.esummary(db = 'gene', id = gene, timeout = 10)
+                record = Entrez.read(handle, validate = False)
+                print(gene_data, record)
+                gene_data.update({
+                'Name': record['DocumentSummarySet']['DocumentSummary'][0]['Name'],
+                'Description': record['DocumentSummarySet']['DocumentSummary'][0]['Description'],
+                'GeneticSource': record['DocumentSummarySet']['DocumentSummary'][0]['GeneticSource'],
+                'MapLocation': record['DocumentSummarySet']['DocumentSummary'][0]['MapLocation'],
+                'OtherAliases': record['DocumentSummarySet']['DocumentSummary'][0]['OtherAliases'],
+                'Mim': record['DocumentSummarySet']['DocumentSummary'][0]['Mim'],
+                'Summary': record['DocumentSummarySet']['DocumentSummary'][0]['Summary']
+                })
+                gene_datas.append(gene_data)
+            except:
+                gene_data = {'GENE_ID' : gene}
+                gene_data.update({
+                'Name': 'Not received', 
+                'Description': 'Not received',
+                'GeneticSource': 'Not received',
+                'MapLocation': 'Not received',
+                'OtherAliases': 'Not received',
+                'Mim': 'Not received',
+                'Summary': 'Not received'
+                })
+                gene_datas.append(gene_data)
+        return gene_datas
+    
+
+
+class VariationSearch():
+    def __init__(self, genes = None):
+        self.general_CV = General(db = 'clinvar')
+        if genes is None:
+            self.genes = self.GetGenes()
+        else:
+            self.genes = genes
+        
+
+    def ClinvarSearch(self):
+        print('Search start ...')
+        all_uids = []
+        for gene in self.genes:
+            handle = Entrez.esearch(db = 'clinvar', term = (str(gene)+'[gene]'), retmax = 10000)
+            record = Entrez.read(handle)
+            uids = record['IdList']
+            print(f'Для гена {gene} найдено {len(uids)} записей в ClinVar. Сохранение...')
+            if len(uids) == 0:
+                print(f'Пустой результат для гена {gene}.')
+            all_uids.append(uids)
+        self.general_CV.uids = all_uids
+        self.general_CV.post()
+    
+    def Download(self):
+        print('download start')
+        data = self.general_CV.web_summ_download()
+        print('Done')
+        exit_df = pd.DataFrame(data)
+        print('Exit dataframe: ', exit_df)
+        exit_df.to_excel(filedialog.asksaveasfilename())       
+
+    def GetGenes(self):
+        data = pd.read_excel(filedialog.askopenfilename())
+        gene_col = data['Name']
+        genes = gene_col.unique().astype(str).tolist()
+        print('Гены для поиска: ', genes)
+        return genes
+    
+
+        
+
+class General():
+    def __init__(self, db):
+        self.db = db
+        self.webenv = None
+        self.query_key = None
+        self.count = 0
+        self.uids = []
+        self.config = self.load_config()
+        print(f'''General object encountered.
+              db = {self.db}
+              config = {self.config}''')
+    
+    def load_config(self):
+        config = configparser.ConfigParser()
+        try:
+            config.read('config.ini')
+        except configparser.Error:
+            config = configparser.ConfigParser()
+        if 'User' not in config or 'email' not in config['User']:
+            config['User'] = {'email':input('Файл конфигурации не обнаружен или повреждён. Будет создан новый.\nВведите email: ')}
+        with open('config.ini', 'w') as config_file:
+            config.write(config_file)
+        return config
+        
+    def post(self):
+        print('post initiated')
+        print(len(self.uids))
+        self.uids = ','.join(map(str, self.uids))
+        print(len(self.uids))
+        search_results = Entrez.read(Entrez.epost(self.db, id=self.uids.encode()))
+        self.webenv = search_results['WebEnv']
+        self.query_key = search_results['QueryKey']
+        self.count = len(self.uids)
+        print('Post done')
+        
+    
+    def web_summ_download(self):
+        data = []
+        exception_bool = False
+        excepted = []
+        for start in range (0, self.count, 10):
+            end = min(self.count, start + 10)
+            print('Сохраняются записи с %i по %i'%(start+1, end))
+            try:
+                summary_handle = Entrez.esummary(
+                    db = self.db,
+                    retstart = start,
+                    retmax = 10, 
+                    webenv = self.webenv,
+                    query_key = self.query_key
+                    )
+                print(summary_handle)
+                print(Entrez.read(summary_handle))
+                data.append(Entrez.read(summary_handle))
+            except Exception as e:
+                excepted.append(start)
+                ex_time = datetime.now()
+                with open('logs.txt', 'a') as file:
+                    file.write(f'Дата и время: {str(ex_time)}\nИсключение: {str(e)}\n')
+                print('Ошибка. Записи не сохранены. Код ошибки сохраняется.\nПовторная попытка - после скачивания остальных публикаций.')
+                print(e)
+                exception_bool = True
+        if exception_bool:
+            for exc in excepted:
+                try:
+                    print('Сохраняются записи с %i по %i'%(start+1, end))
+                    summary_handle = Entrez.esummary(
+                        db = self.db,
+                        retstart = exc,
+                        retmax = 10, 
+                        webenv = self.webenv,
+                        query_key = self.query_key
+                        )
+                    data.append(summary_handle = Entrez.read(summary_handle))
+                    print('Сохранено успешно с %i по %i'%(start+1, end))
+                except:
+                    print('Повторная попытка скачивания не удалась.\n') 
+            exception_bool = False
+        return data
+    
+
+#search = GeneSearch()
+#gene_val = search.GetGenes()
+#genes_ids = search.search_IDs(gene_val)
+#genes_data = search.search_genes(genes_ids)
+#genes_dataframe = pd.DataFrame(genes_data)
+#genes_file = filedialog.asksaveasfilename(filetypes=[("Excel files", "*.xlsx;*.xls"),
+#                                                               ("All files", "*.*")])
+#genes_dataframe.to_excel(genes_file)
+variations = VariationSearch()
+variations.ClinvarSearch()
+variations.Download()
